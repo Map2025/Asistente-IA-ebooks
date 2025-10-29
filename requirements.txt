@@ -2,7 +2,7 @@ pip>=25.2
 setuptools>=68.0
 wheel
 
-psycopg2-binary==2.9.9
+psycopg2-binary==2.9.8
 
 # Streamlit para la app web
 streamlit==1.28.0
