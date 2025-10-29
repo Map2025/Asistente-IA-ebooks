@@ -1,32 +1,32 @@
 import streamlit as st
-import uuid
 import psycopg2
 import psycopg2.extras
 import pandas as pd
+import uuid
+import os
 from services.openai_service import generar_texto_openai, generar_embedding
 from services.db_service import obtener_ebooks_disponibles, buscar_fragmentos
 from services.ebook_service import crear_docx
 from services.tts_service import reproducir_audio
 from utils.helpers import limpiar_estado
-from streamlit_cookies_manager import EncryptedCookieManager
 
 st.set_page_config(page_title="Asistente Inteligente ebooks de IA", layout="centered")
 
 # --------------------------
-# Configuración cookies para user_id persistente
+# Solicitar correo del usuario
 # --------------------------
-cookies = EncryptedCookieManager(prefix="ebooks_app_", password="clave-secreta-larga")
-if not cookies.ready():
-    st.stop()
+if "user_email" not in st.session_state:
+    email = st.text_input("✉️ Ingresa tu correo electrónico para usar el asistente:")
+    if email:
+        st.session_state["user_email"] = email.strip().lower()
+        st.rerun()
+    else:
+        st.stop()
 
-if "user_id" not in cookies:
-    cookies["user_id"] = str(uuid.uuid4())
-    cookies.save()
-
-user_id = cookies["user_id"]
+user_email = st.session_state["user_email"]
 
 # --------------------------
-# Conexión a Postgres usando DATABASE_URL y cacheando recurso
+# Conexión a Postgres
 # --------------------------
 @st.cache_resource
 def init_connection():
@@ -41,23 +41,43 @@ def init_connection():
     )
 
 conn = init_connection()
+
 # --------------------------
 # Funciones de control de créditos
 # --------------------------
-@st.cache_data
-def get_or_create_user(user_id: str):
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute("SELECT user_id, credits FROM users WHERE user_id = %s", (user_id,))
+def get_or_create_user(email: str, _conn):
+    """
+    Busca un usuario por email. Si no existe, crea uno nuevo con user_id tipo UUID.
+    Devuelve: (user_id, credits)
+    """
+    if not email:
+        raise ValueError("Email no puede ser None o vacío")
+
+    with _conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("SELECT user_id, credits FROM users WHERE email = %s", (email,))
         row = cur.fetchone()
         if row:
             return row["user_id"], row["credits"]
-        else:
+
+        new_user_id = str(uuid.uuid4())
+        initial_credits = 20
+
+        try:
             cur.execute(
-                "INSERT INTO users (user_id, credits) VALUES (%s, %s) RETURNING user_id, credits",
-                (user_id, 20)
+                """
+                INSERT INTO users (user_id, email, credits)
+                VALUES (%s, %s, %s)
+                RETURNING user_id, credits
+                """,
+                (new_user_id, email, initial_credits)
             )
-            conn.commit()
-            return cur.fetchone()
+            row = cur.fetchone()
+            _conn.commit()
+            return row["user_id"], row["credits"]
+        except psycopg2.Error as e:
+            _conn.rollback()
+            st.error(f"Error al crear usuario: {e}")
+            raise
 
 def update_credits(user_id: str, amount: int, action_type: str):
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -78,7 +98,6 @@ def update_credits(user_id: str, amount: int, action_type: str):
         else:
             return None
 
-@st.cache_data
 def get_transaction_history(user_id: str):
     query = """
         SELECT created_at, action_type, amount
@@ -88,6 +107,20 @@ def get_transaction_history(user_id: str):
         LIMIT 50
     """
     return pd.read_sql(query, conn, params=(user_id,))
+
+# --------------------------
+# Inicializar usuario y créditos
+# --------------------------
+try:
+    user_id, credits = get_or_create_user(user_email, conn)
+except ValueError:
+    st.warning("Por favor ingresa un correo electrónico válido.")
+    st.stop()
+
+if "credits" not in st.session_state:
+    st.session_state["credits"] = credits
+
+st.sidebar.metric("💰 Créditos disponibles", st.session_state["credits"])
 
 # --------------------------
 # Inicialización de estados
@@ -106,14 +139,6 @@ if "ebook_estado" not in st.session_state:
     }
 
 pregunta_key = "pregunta_input"
-
-# --------------------------
-# Obtener saldo actual
-# --------------------------
-user_id, credits = get_or_create_user(user_id)
-if "credits" not in st.session_state:
-    st.session_state["credits"] = credits
-st.sidebar.metric("💰 Créditos disponibles", st.session_state["credits"])
 
 # --------------------------
 # Estilos
@@ -137,7 +162,6 @@ if not ebooks:
 
 ebook_seleccionado = st.selectbox("📚 Selecciona el ebook:", ebooks, key="ebook_seleccionado")
 
-# Botón hacia tienda
 tienda_url = "https://serviciosoft.odoo.com/shop"
 st.markdown(f'''
     <a href="{tienda_url}" target="_blank" style="
@@ -268,15 +292,16 @@ elif st.session_state.modo == "ebook":
                 st.warning("Responde sí o no.")
         elif current_paso == "finalizar":
             if respuesta.lower() in ["sí", "si", "s"]:
-                archivo = crear_docx(estado["contenido"], estado["datos"]["titulo"])
+                archivo_base = "ebook_generado.docx"
+                archivo_actualizado = crear_docx(estado["contenido"], archivo_base)
                 estado["archivo_creado"] = True
+                estado["archivo_actualizado"] = archivo_actualizado
                 estado["paso"] = "completo"
-                st.success(f"Ebook generado: {archivo}")
+                st.success(f"Ebook generado: {archivo_actualizado}")
             else:
                 st.info("Proceso finalizado sin crear archivo.")
                 estado["paso"] = "completo"
 
-    # Generar índice
     if estado["paso"] == "generar_indice":
         st.info("Generando índice, por favor esperá...")
         prompt_indice = f"""
@@ -291,9 +316,11 @@ Separa títulos y subtítulos claramente.
         estado["paso"] = "confirmar_indice"
         st.rerun()
 
-    # Generar capítulos
     elif estado["paso"] == "generar_todos_capitulos":
         st.info("Generando todos los capítulos, esto puede tardar un poco...")
+
+        estado["contenido"] = [item for item in estado["contenido"] if item["tipo"] == "indice"]
+
         indice = next((item['texto'] for item in estado["contenido"] if item['tipo'] == 'indice'), "")
         for i in range(1, estado["datos"]["capitulos"] + 1):
             prompt_cap = f"""
@@ -312,7 +339,6 @@ Desarrolla el capítulo con subtítulos y ejemplos. Extensión mínima: 800 pala
         estado["paso"] = "finalizar"
         st.rerun()
 
-    # Entrada de usuario para cada paso del ebook
     else:
         pregunta_ebook = {
             "pedir_titulo": "¿Cuál será el título del ebook?",
@@ -325,21 +351,17 @@ Desarrolla el capítulo con subtítulos y ejemplos. Extensión mínima: 800 pala
             "completo": "Proceso finalizado. Recargá la página para crear otro ebook."
         }
         prompt = pregunta_ebook.get(estado["paso"])
-        if prompt:
+        if prompt and estado["paso"] not in ["generar_indice", "generar_todos_capitulos"]:
             respuesta = st.text_input(prompt, key="input_ebook")
-            if estado["paso"] == "pedir_titulo" and st.button("Cancelar creación de ebook"):
-                limpiar_estado()
-                st.rerun()
             if respuesta:
                 avanzar_ebook(respuesta)
                 st.rerun()
 
-    # Descargar ebook
-    if estado.get("archivo_creado"):
-        with open("ebook_generado.docx", "rb") as f:
+    if estado.get("archivo_creado") and os.path.exists(estado.get("archivo_actualizado", "")):
+        with open(estado["archivo_actualizado"], "rb") as f:
             st.download_button(
                 label="Descargar ebook generado",
                 data=f,
-                file_name="ebook_generado.docx",
+                file_name="ebook_actualizado.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
