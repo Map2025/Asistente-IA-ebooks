@@ -2,7 +2,7 @@ pip>=25.2
 setuptools>=68.0
 wheel
 
-psycopg2-binary==2.9.8
+psycopg2-binary==2.9.9
 
 # Streamlit para la app web
 streamlit==1.28.0
@@ -18,13 +18,17 @@ sqlalchemy==2.0.20
 
 
 # Manejo de documentos Word
-python-docx==0.8.12
+python-docx
 
 # Librerías de utilidad
 numpy==1.26.0
 pandas==2.1.0
 
 # Cookies persistentes para Streamlit
-streamlit-cookies-manager==0.5.0
+streamlit-cookies-manager
 
 pyarrow
+
+pillow
+
+PyPDF2==3.0.1
