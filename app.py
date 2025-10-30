@@ -293,6 +293,10 @@ elif st.session_state.modo == "ebook":
         elif current_paso == "finalizar":
             if respuesta.lower() in ["sí", "si", "s"]:
                 archivo_base = "ebook_generado.docx"
+                if not os.path.exists(archivo_base):
+                  from docx import Document
+                  Document().save(archivo_base)  # Archivo vacío inicial
+
                 archivo_actualizado = crear_docx(estado["contenido"], archivo_base)
                 estado["archivo_creado"] = True
                 estado["archivo_actualizado"] = archivo_actualizado
